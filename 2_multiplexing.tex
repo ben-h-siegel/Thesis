@@ -1,0 +1,215 @@
+\chapter{Signal Multiplexing of Sensing and Feedback} \label{multiplexing}
+
+The greatest challenge in creating an array of optically levitated particles is the ability to monitor the signals from multiple channels without requiring the number of readout sensors to scale proportionally with the array's size and without introducing crosstalk when implementing feedback. 
+
+\section{Schemes of Multiplexing}
+The most basic implementation of multiplexing is space division multiplexing (SDM), also referred to as spatial multiplexing. This method requires an additional transmitter and receiver for each channel, making it difficult to scale for large channel systems. With the development of large telecommunication and wireless networks, more complex multiplexing has proved to be pivotal. As early as the 1910s, patents were issued for methods for multiplexing data transmission. These development efforts have led to three main techniques for combining signals in more efficient manners: Frequency Division Multiplexing (FDM), Wavelength Division Multiplexing (WDM), and Time Division Multiplexing (TDM).
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/multiplex/multiplexing_diagram.jpg}
+    \caption{Different schemes of multiplexing.}
+    \label{fig:multiplex_diagram}
+\end{figure}
+
+\subsection{Space Division Multiplexing} \label{sec:SDM}
+Even though SDM is the least efficient use of resources, requiring more transmitters, sensors, and analog/digital independent paths when scaling, it provides the best separation of channels. Any crosstalk introduced in the system is due to imperfections or limitations of material used (e.g. leakage in single mode fiber bundles). For the trivial implementation of SDM in a levitated array of particles, each particle would have an independent actuator used to create the trap and cool the particle's motion. Implementation means either using independent laser sources for every trap or splitting a single laser beam and using an actuator that affects each trap independently. The second of these options could be achieved with an Acousto-Optic Deflector to create a rectangular grid of beams and actuating the position of the beams with a Spatial Light Modulator or Digital Micromirror Device. This solution is limited to the levitation of micron-sized particles, as sub-micron particles exhibit resonant frequencies above the capabilities of these devices. Each particle would also require its own set of sensors to monitor the motion. To encapsulate the full center-of-mass motion, at least three measurements bases are required per trapped particle. These can be tightly packed though, being satisfied by a single quadrant photodetector. To create a closed loop system for each trap, there must be an independent analog and digital signal path for each trap in the array. This means that for digital implementation of N traps with a dedicated field programmable gate array (FPGA), at least 3N analog inputs and N analog outputs are necessary. A clever way of efficiently packing the sensors and data channels for the readout side of multiplexing is through the use of camera imaging. Each particle is observed by a set of independent pixels on the camera and motion recreation algorithms use the pixel's values and locations to determine the relative three dimensional position of the particle, as disscused further in chapter~\ref{chapter:camera}. Camera detection's limitations are the frame rate of the camera and the processing speed of the tracking algorithm, making it difficult to implement a closed loop system. This can be partially solved using neuromorphic hardware like Event Based Cameras, achieving much faster frame rates and greatly reducing the data throughput the tracker has to process. This is expanded upon in section~\ref{sec:EBC} of Chapter~\ref{camera}. The main sources of 
+
+\subsection{Frequency Division Multiplexing}\label{sec:FDM}
+
+The pivotal point in FDM dividing up a system with a large bandwidth into multiple sub-bands for carrying the information from different channels.
+
+\subsection{Wavelength Division Multiplexing}\label{sec:WDM}
+
+
+\subsection{Time Division Multiplexing} \label{sec:TDM}
+
+Time Division Multiplexing uses mutually exclusive time intervals to separate the data of different channels. It has been in use since the early 1900s\cite{bennett_time_1941} and has demonstrated success in multiple systems such as fiber-based strain sensors, SQUID readout, and telephone communications. It was famously mathematically characterized by Herbert Raabe in his 1939 thesis\cite{butzer_herbert_2010,butzer_multiplex_2011}, and a more generalized form introduced by W. R. Bennet in 1941\cite{bennett_time_1941}.
+\subsubsection{Principles of TDM}
+Following Bennet's derivation of time division multiplexing and demultiplexing\cite{bennett_time_1941}, the general equation for a TDM multiplexer acting on one channel is given by Eq.~\ref{eq:TDMultiplexer} where $\nu$ is any potential frequency shift of the signal as it passes through the switch and $T$ is the interval time used for each channel. $F_j(t)$ corresponds to the admittance of input signal j at time t. 
+
+\begin{equation}\label{eq:TDMultiplexer}
+    F_j(t) = \sum_{m=0}^{\infty} A_{mj} ~ cos([\nu+m(2\pi/T)]t-\theta_{mj})
+\end{equation}
+
+For simple systems as we will consider here, $\nu$ is negligible. Then using that the switch is periodic at a frequency of $2\pi/T$, by Fourier series analysis, we get solutions for $A_{mj}$ and $\theta_{mj}$.
+\begin{equation}
+\begin{gathered}
+    \begin{split}
+        m = 0 \begin{cases} 
+        A_{0j} = a_0 / 2 & \\ \theta_{0j} = 0
+        \end{cases} 
+    \end{split},~
+    \begin{split}
+        m > 0 \begin{cases} 
+        A^{mj} = a^2_{mj} + b^2_{mj} & \\ tan(\theta_{mj}) = b_{mj}/a_{mj}
+        \end{cases}
+    \end{split}
+    \\
+    a_{mj} = \frac{2}{T} \int_{t}^{T+t} F_j(t')cos(2\pi mt'/T) dt'\\
+    b_{mj} = \frac{2}{T} \int_{t}^{T+t} F_j(t')sin(2\pi mt'/T) dt'
+\end{gathered}
+\end{equation}
+
+Assuming sinusoidal input signals into the multiplexer, which can be described as $E_j = E_{0j} e^{iw_jt}$, the multiplexed signal is given by Eq.~\ref{eq:TDMinter}
+
+\begin{equation}\label{eq:TDMinter}
+    \Xi_{j,in}(t) = F_j(t)E_j(t) = \frac{E_{0j}}{2} \sum_{m=0}^{\infty} A_{mj}(e^{i(w_j + 2\pi m/T)t - i\theta_{mj}} + e^{i(w_j - 2\pi m/T)t + i\theta_{mj}})
+\end{equation}
+Here we see that if we extend this logic to generalized input signals, the input signals will become sidebands on harmonics of the switching frequency in the multiplexed signal. This multiplexed signal can then be transmitted through a carrier, which will likewise act upon the signal. Given that the carrier transmission line has a transfer impedance of $Z(iw)$ the resulting signal at its output follows eq.~\ref{eq:TDMlineout}.
+
+\begin{equation}\label{eq:TDMlineout}
+\begin{aligned}
+    \Xi_{j,out} = \frac{E_{0j}}{2} \sum_{m=0}^{\infty} A_{mj}Z[i(2\pi m/T + w_j)]e^{i(w_j + 2\pi m/T)t - i\theta_{mj}} \\
+    + \frac{E_{0j}}{2} \sum_{m=0}^{\infty} A_{mj}Z^{*}[i(2\pi m/T - w_j)]e^{-i(w_j - 2\pi m/T)t + i\theta_{mj}}
+\end{aligned}
+\end{equation}
+
+This output signal is processed by a demultiplexer $G_k(t)$ which has a similar response to the multiplex switch in the beginning.
+\begin{equation}\label{eq:TDMdemuxer}
+    G_k(t) = \sum_{n=0}^{\infty} B_{nk} ~ cos([\nu+n(2\pi/T)]t-\phi_{nk})
+\end{equation}
+The coefficients for the admission of signal k in the demultiplexer follow from Fourier analysis:
+
+\begin{equation}
+\begin{gathered}
+    \begin{split}
+        m = 0 \begin{cases} 
+        B_{0k} = c_0 / 2 & \\ \phi_{0k} = 0
+        \end{cases} 
+    \end{split},~
+    \begin{split}
+        m > 0 \begin{cases} 
+        B^{nk} = c^2_{nk} + d^2_{nk} & \\ tan(\phi_{nk}) = d_{nk}/c_{nk}
+        \end{cases}
+    \end{split}
+    \\
+    c_{nk} = \frac{2}{T} \int_{t}^{T+t} G_k(t')cos(2\pi nt'/T) dt'\\
+    d_{nk} = \frac{2}{T} \int_{t}^{T+t} G_k(t')sin(2\pi nt'/T) dt'
+\end{gathered}
+\end{equation}
+
+From a time domain multiplexer using the most general form for the switching operations, we recover the signal described by Eq.~\ref{eq:TDMout}.
+\begin{equation}\label{eq:TDMout}
+\begin{aligned}
+    H_k(t) = \frac{E_{0j}}{4} \sum_{m=0}^{\infty}\sum_{n=0}^{\infty} A_{mj}B_{nk}Z[i(2\pi m/T + w_j)]\\
+    (e^{i(w_j + 2\pi (m+n)/T)t - i(\theta_{mj}+\phi_{nk}}) + e^{i(w_j + 2\pi (m-n)/T)t - i(\theta_{mj}+\phi_{nk}}))\\
+    + \frac{E_{0j}}{4} \sum_{m=0}^{\infty}\sum_{n=0}^{\infty} A_{mj}B_{nk}Z^{*}[i(2\pi m/T - w_j)]\\
+    (e^{-i(2\pi (m+n)/T - w_j)t + i(\theta_{mj}+\phi_{nk}}) + e^{i(w_j + 2\pi (n-m)/T)t - i(\theta_{mj}+\phi_{nk}}))
+\end{aligned}
+\end{equation}
+At the output, we get a doubly infinite set of sidebands on the harmonics of the TDM switching frequency. We can, however, recover the original input signals as long as the switching frequency meets the Nyquist criteria for sampling them (i.e. $w_j < \pi/T$). With this satisfied, a low pass filter with a cutoff frequency off $1/2T$ will isolate the the baseband signals from any sideband signals on the switching frequency harmonics.\par
+Taking the ratio of the demultiplexed output $H_k(t)$ and the initial input $E_j(t)$, we see that with the low pass filter the output signal in a particular channel is:
+\begin{equation}\label{eq:TDMadmit}
+\begin{aligned}
+    Y_{jk} &= A_{0j}B_{0k}Z(iw_j)\\
+    &+ 1/4 \sum_{m=1}^{\infty} A_{mj}B_{mk} Z[i(2\pi m/T + w_j)]e^{-i(\theta_{mj}-\phi_{mk})}\\
+    &+ 1/4 \sum_{m=1}^{\infty} A_{mj}B_{mk} Z^{*}[i(2\pi m/T - w_j)]e^{i(\theta_{mj}-\phi_{mk})}
+\end{aligned}
+\end{equation}
+This describes the admittance of a TDM system under the general forms of the multiplexing/demultiplexing switching mechanisms and transmission line. Note that if the input signals are bandlimited with $w_j < 2\pi /T$, as previously stated, and a filter can be placed on the output lines with a cutoff frequency of half the TDM switching rate, then only the first term of $Y_{jk}$ affects the final signal.
+\par
+If the multiplexing and demultiplexing switches are simply represented by ideal on/off toggles, then the equations for F and G can be described as step functions that are identical in shape for all input channels. The admittance of each channel has a time shift, such that the non-zero periods for each channel do not coincide.
+\begin{equation}
+\begin{gathered}
+    F_j(t) = F_1[t-(j-1)T/N]\\
+    A_{mj} = A_{m1}\\
+    \theta_{mj} = \theta_{m1} + 2\pi m (j-1)/N
+\end{gathered}
+\end{equation}
+In some systems, such as our own, it is beneficial to not use an entire TDM segment period as the on portion of the switch. This buffer of time can mitigate crosstalk due to rise/fall time in the system adding delays to the signal. If only a percentage ($x$) of the total segment time is used with the buffer time symmetrically distributed to the start and end of the TDM segment, then the reference switch for multiplexing N channels can be written as:
+\begin{equation}\label{eq:TDMportionused}
+    F_1(t) = \begin{cases} A,  \quad -\frac{xT}{2N} < t < \frac{xT}{2N}\\
+    0, \qquad \frac{xT}{2N} < t < \frac{(2N-x)T}{2N}
+    \end{cases}
+\end{equation}
+The demultiplexing switch coefficients follow similarly with the same amplitude $G_{mj}$ for each channel and a time offset between each channel's phase $\phi_{mj}$. From Fourier analysis, this gives us the coefficients for the multiplexer (A and $\theta$) and the demultiplexer (B and $\phi$).
+\begin{equation}
+\begin{gathered}
+    A_{01} = Ax/N\\
+    A_{m1} = \frac{2A}{m\pi}sin(\pi*m*x/N)~ , ~m>0\\
+    \theta_{m1}=0\\\\
+    B_{01} = Bx/N\\
+    B_{m1} = \frac{2B}{m\pi}sin(\pi*m*x/N)~ , ~m>0\\
+    \phi_{m1}=\frac{2\pi m}{T} \tau_{delay}
+\end{gathered}
+\end{equation}
+In the demultiplexer phase coefficient, $\tau_{delay}$ is introduced to correct for the signal delay from the time to propagate through the line. To approximate this delay in the transmission line's impedance, Bennet assumes it takes the form of a linear phase component resulting in Eq.~\ref{eq:TDMlineimpedanceapprox}.
+\begin{equation}\label{eq:TDMlineimpedanceapprox}
+    Z(iw) = Z_0(iw) e^{-iw\tau_{delay}}
+\end{equation}
+Following through the steps from equations \ref{eq:TDMinter} to \ref{eq:TDMadmit}, the admittance of a TDM system using simple switches is:
+\begin{equation}\label{eq:TDMadmitsimple}
+\begin{aligned}
+    Y_{jk} &= ABe^{-iw_j\tau_{delay}}(\frac{x^2}{N^2}Z_0(iw_j)\\
+    & + \sum_{m=1}^{\infty} \frac{sin^2(mx\pi/N)}{m^2\pi^2}Z_0[i(2\pi m/T + w_j)]e^{-i(j-k)2\pi m/N}\\
+    & + \sum_{m=1}^{\infty} \frac{sin^2(mx\pi/N)}{m^2\pi^2}Z_0^{*}[i(2\pi m/T - w_j)]e^{i(j-k)2\pi m/N}
+\end{aligned}
+\end{equation}
+
+If the transmission line has a constant attenuation through the Mth sideband on the TDM switching frequency ($M*2\pi /T ~+~w_j$) and suppresses all above it. The admittance becomes
+
+\begin{equation}\label{eq:TDMadmitharmonic}
+    Y_{jk} = \frac{ABx^2}{N^2}Z_0e^{-iw_j\tau_{delay}}[1+ 2\sum_{m=1}^{M}\frac{sin^2(mx\pi/N)}{(m\pi x/N)^2}cos(2\pi m (j-k)/N)]
+\end{equation}
+
+From the admittance, we can find the crosstalk of channel k's signal into the output of channel j.
+
+\begin{equation}\label{eq:TDMcrosstalk}
+    \frac{Y_{jk}}{Y_{kk}} = \frac{1+ 2\sum_{m=1}^{M}(\frac{sin(mx\pi/N)}{m\pi x/N})^2 cos(2\pi m (j-k)/N)}{1+2\sum_{m=1}^{M}(\frac{sin(mx\pi/N)}{m\pi x/N})^2}
+\end{equation}
+
+In the case that the percentage of time used by the multiplexer switch ($\chi$) and the demultiplexer switch ($\kappa$) is different. Equations \ref{eq:TDMadmitharmonic} and \ref{eq:TDMcrosstalk} become
+
+\begin{equation}\label{eq:TDMadmitasymm}
+    Y_{jk} = \frac{AB\kappa \chi}{N^2}Z_0e^{-iw_j\tau_{delay}}[1+ 2\sum_{m=1}^{M}\frac{sin(m\chi\pi/N)sin(m\kappa\pi/N)}{\chi\kappa(m\pi/N)^2}cos(2\pi m (j-k)/N)]
+\end{equation}
+\begin{equation}\label{eq:TDMcrossasymm}
+    \frac{Y_{jk}}{Y_{kk}} = \frac{1+2\sum_{m=1}^{M}\frac{sin(m\chi\pi/N)sin(m\kappa\pi/N)}{\chi\kappa(m\pi/N)^2} cos(2\pi m (j-k)/N)}{1+2\sum_{m=1}^{M}\frac{sin(m\chi\pi/N)sin(m\kappa\pi/N)}{\chi\kappa(m\pi/N)^2}}
+\end{equation}
+
+\begin{figure}
+    \makebox[0.9\textwidth][c]{
+    \includegraphics[width=1.1\linewidth]{figures/multiplex/crosstalk.pdf}}
+    \caption{The suppression of crosstalk between neighboring channels as a function of the transmission line's bandwidth. The bandwidth is represented by the number of signal sidebands it can transmit. Different proportions of TDM segment used are shown. Note that in the limiting case of the proportion used going to zero, undefined regions appear. These regions have perfect crosstalk suppression.}
+    \label{fig:TDMcrosstalk_connect}
+\end{figure}
+
+\begin{figure}
+    \makebox[0.9\textwidth][c]{
+    \includegraphics[width=1.1\linewidth]{figures/multiplex/crosstalk_asymm.pdf}}
+    \caption{The suppression of crosstalk between neighboring channels as a function of the transmission line's bandwidth when the used proportion differs between the multiplexing mechanism and demultiplexing mechanism. The bandwidth is represented by the number of signal sidebands it can transmit. Different proportions of TDM segment used for the demultiplexing switch ($\kappa$) are shown. The proportion used for the multiplexing switch ($\chi$) is set to 80\% of the total segment.}
+    \label{fig:TDMcrosstalk_asymm}
+\end{figure}
+
+\begin{figure}
+    \makebox[0.9\textwidth][c]{
+    \includegraphics[width=1.1\linewidth]{figures/multiplex/crosstalk_channels.pdf}}
+    \caption{The suppression of crosstalk between neighboring channels as a function of the transmission line's bandwidth. The bandwidth is represented by the number of signal sidebands it can transmit. The performance for various total numbers of channels multiplexed is shown. The entire segment is used (x=1). Greater numbers of channels requires a higher bandwidth to reach comparable suppression, with suppression growing more slowly after going beyond a transmitted bandwidth of $\approx\frac{3}{4}N*f_{cycle}$.}
+    \label{fig:TDMcrosstalk_channel}
+\end{figure}
+
+\begin{figure}
+    \makebox[0.9\textwidth][c]{
+    \includegraphics[width=1.1\linewidth]{figures/multiplex/crosstalk_separation.pdf}}
+    \caption{The suppression of crosstalk between channels as a function of the transmission line's bandwidth for 25 multiplexed channels. The bandwidth is represented by the number of signal sidebands it can transmit. The suppression between channels as a function of how separated they are in the time domain multiplexing chain is shown. The proportion used per TDM segment is set to 1. The furthest apart channels (e.g. channel 0 and 12 for this case) achieve the best performance as expected. Note that a separation of 2 is identical to using x=0.5 for a separation of 1.}
+    \label{fig:TDMcrosstalk_separation}
+\end{figure}
+
+Under the condition where the proportion of connection time approaches zero, the signal for each channel is akin to a pulse train wave. In this limit, the sidebands become nearly equal in amplitude and a greater number have a significant contribution, trending towards an infinite number of nonneglibable sidebands. Using the values of the multiplexing switch amplitude coefficient $A_{mj}$ and demultiplexing switch amplitude coefficient $B_{mk}$, equation~\ref{eq:TDMcrosstalk} simplifies significantly.
+
+\begin{equation}\label{eq:TDMlimitcrosstalk}
+\begin{aligned}
+    \frac{Y_{jk}}{Y_{kk}} &= \frac{1+ 2\sum_{m=1}^{M}cos(2\pi m (j-k)/N)}{1+2M} \\
+    &=\begin{cases}
+        1, \qquad \qquad \qquad \qquad \quad ~ ~ j=k
+        &\\
+        \frac{sin(\pi(2M+1)(k-j)/N)}{(2M+1)sin(\pi((k-j)/N)}, \qquad j\neq k
+    \end{cases}
+\end{aligned}
+\end{equation}
+
+\subsubsection{Implementation of TDM in an Array of Levitated Microspheres}
+In our system the multiplexing switch can be thought of as the chain of the FPGA's outputs, the RF filters and amplifiers, and the AOD. The largest deviation from an ideal switch comes from the AOD's rise/fall time (rated to be $1~mm/\mu s$) and optical access time (given as $1.5~mm/\mu s$) while deflecting the laser to form each individual trap. With the laser's diameter in the AOD being 4~mm, these effects limit the shortest TDM segments to be greater than $4~\mu s$ or a switching frequency less than $250~kHz$. Any faster results in noticeable crosstalk in the traps and smearing of the optical potential due to wavefront tilt. To keep the rastering between the traps from affecting the spheres' motion, the entire TDM cycle frequency is kept a factor of 10 larger than the highest motional resonant frequency, setting a general limit of $f_{cycle} > 2.5~kHz$. These limitations set bounds on the size of array possible for the multiplexing components $f_{switch} / f_{cycle}$. As such, it is feasible to generate a multiplexed signal for $\approx100$ traps.\par
+The transmission line corresponds to the optics, readout photodiodes and electronics that affect the signal before being read by the FPGA's ADC. This also presents a great challenge, as the transmission line's bandwidth heavily impacts the crosstalk between channels as investigated in the above section. To achieve good crosstalk suppression, high-speed photodiodes are of utmost importance in creating scalable arrays.\par
+The digital signal processing in the FPGA to separate each time segment represents the demultiplexing switch. Due to the DAC's reference clock being at least two orders of magnitude greater than the highest harmonics to be considered, the FPGA acts as an ideal on/off switch with complete customization for the proportion and subsection of TDM segment used. 

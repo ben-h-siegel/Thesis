@@ -2,25 +2,26 @@
 % See here for more detailed guidelines on dissertation format
 % https://gsas.yale.edu/sites/default/files/formatdissertation.pdf
 
-
+\usepackage{amsmath}
 \usepackage{graphicx}
 \usepackage{lscape}
 \usepackage{times}
 \usepackage{float}
 \usepackage{amssymb}
 \usepackage{afterpage}
-%\usepackage{natbib}
+\usepackage[style=phys]{biblatex}
+\addbibresource{references.bib}
 \usepackage{epsfig}
 \usepackage{longtable}
-\usepackage[pagebackref=true]{hyperref}
+\usepackage[pagebackref=false]{hyperref}%backref=true breaks the biblatex for some reason when using my zotero integration
 \usepackage{hyperref}
 \usepackage{color}
+\usepackage{caption}
+.\usepackage{subcaption}
 \usepackage{setspace}
 \usepackage{titlesec}
 \definecolor{linkColor}{rgb}{0.,0.11,0.22}
 \definecolor{YaleBlue}{rgb}{0.0,0.22,0.444}
-\usepackage{natbib}
-
 
 \begin{document}
 
@@ -54,18 +55,17 @@
     \tableofcontents % 
     \listoffigures   % The standard LaTeX form works well.
     \listoftables    % 
-    
+       %\addcontentsline{toc}{chapter}{Bibliography} % To get an entry in the TOC.
+    %setstretch{1.0}
     \mainmatter      % Reset the pagenumbering options
 
-	\include{Introduction}
-	\include{Chapter2}
-
-
-   \addcontentsline{toc}{chapter}{Bibliography} % To get an entry in the TOC.
-    \setstretch{1.0}
-    
-    \bibliography{bibfile}
-
+	%\include{Introduction}
+	\include{2_multiplexing}
+    \include{9_FPGA}
+    \printbibliography[
+heading=bibintoc,
+title={Works Cited}
+]
 
 
 \end{document}

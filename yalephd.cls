@@ -146,12 +146,13 @@ class]
 \setlength{\textheight}{8.8in}      % 9" less a smidge to get 1"
                                         % bottom margin
 \setlength{\footskip}{.5in}     % footer .5" from bottom
+
 \setlength{\oddsidemargin}{0.5in}   % 1.5" left margin
 \setlength{\evensidemargin}{0.5in}  % all pages
-\setlength{\textwidth}{5.95in}      % 1" right margin, 6" textwidth
+\setlength{\textwidth}{5.95in}      % 1" right margin, 6" textwidth                                         when using original formatting
 
-%\setstretch{1.7}            % Produces double spacing
-\setstretch{1.1}            % Produces single spacing
+%\setstretch{1.75}            % Produces double spacing
+\setstretch{1.15}            % Produces single spacing
 
 \catcode`\@=11\relax
 

@@ -1,0 +1,532 @@
+\chapter{FPGA Design} \label{fpga}
+
+A custom FPGA controller has been implemented using Labview with a National Instruments NI5873 device. This device consists of a four channel DAC (digital-to-analog converter) and  four channel ADC (analog-to-digital converter) controlled by a 100~MHz internal reference clock. To maintain the lock of the ADC and DAC controls to the reference clock, much of the FPGA architecture is done using single-cycle-time-loop (SCTL) programming. In this method, the logic within the loops that address the analog inputs/outputs must be able to run within one clock cycle or have dedicated delay nodes to conclude calculations in successive iterations. 
+
+\section{Generating the RF Outputs}
+The output signals are generated using dense sine wave look-up-tables. The frequency is determined by the rate of iteration through the lookup tables' indices, and the amplitude is controlled by multiplication blocks. To load the waveforms onto the FPGA, a circular buffer iteratively writes each waveform data to different look-up table blocks. As a single look-up table block cannot be accessed by multiple calls in one instance of an SCTL, each desired call instance required a dedicated memory block. This creates a trade-off between the output frequency resolution and the number of desired reference blocks. The undistorted frequency resolution is determined by how changing the address incrementer by one would affect the number of cycles to run through the waveform template. For a template with n datapoints, looking up every $x^{th}$ point in the template in a timed loop running at speed $c$ results in an output wave with a frequency of $f$ defined in Eq. ~\ref{eq:outputf}.
+\begin{equation}\label{eq:outputf}
+    f = \frac{c}{n*x}
+\end{equation}
+Thus, the undistorted frequency resolution can be determined as the difference when changing x by 1.
+\begin{equation}
+    \delta f = c/n
+\end{equation}
+A prerequisite for synthesis in this method is ensuring the waveform template seamlessly wraps and taking the modulo of the incrementer when surpassing the size of the lookup table. Finer resolution can be obtained at the expense of degrading the output signal. By addressing the same point multiple times, we can further digitize the sine wave. This delay in iteration allows for slower completion of the template but can result in asymmetric digitization of the output signal leading to varying distribution of power among the harmonics of the desired signal. The degradation of the output signal is akin to the effects of accumulated timing jitter in sine wave synthesis. This new frequency resolution is given by Eq.~\ref{eq:finef}, where d is the fractional depth of the iterator used to call the template with the integer rounded iterator's value corresponding to the address of the datapoint requested.
+\begin{equation}\label{eq:finef}
+    \delta f = c/(2^d*n)
+\end{equation}
+In our system, c is the 100~MHz reference clock, the lookup table size is $n=2^{14}$ and the fixed point incrementer has $d=11$ decimal bits. From eq.~\ref{eq:outputf} we have frequency resolution of $\approx 6.104kHz$, and from eq.~\ref{eq:finef} we have frequency resolution of $\approx 3Hz$.
+\par
+Keeping large templates becomes valuable when considering applying feedback. If only static traps were required, one could optimize the waveform sizes to be exactly as large as needed, saving on memory. When trying to move the trapping beams, tuning the frequency of the optimized templates results in a worse frequency resolution and introduces more distortion, making feedback less effective.
+
+\begin{figure}[p]
+    \makebox[\textwidth][c]{
+    \includegraphics[width=1.2\linewidth]{figures/FPGA/TDM FPGA output block.png}}
+    \caption{Diagram of FPGA code to generate TDM signals to control the AOD. The output generation loop is sycned to the FPGA's 100~MHz reference clock, which means that all operations inside must be able to finish execution within one clock cycle (10~ns). Before operation, Waveform Template 1 and 2 are filled with a reference sine wave. Note that even though Waveform Template 1 and 2 are exact copies of each other, two memory blocks are required as two different addresses of a memory block cannot be accessed in a single loop's execution. To create the output signal, we crawl through the values in these template blocks. The speed at which we go through the block, which is set by the iterator variables, determines the output's frequency. Once we get to the last value in the template block, we loop to the beginning values in a seamless way that does not introduce a discontinuity in the phase of the output signal. To control the amplitude of the output signal, we multiply by the Amplitude variables. For applying real-time modulation or feedback to the output frequency or amplitude, we use memory blocks to transfer data from other loops in the FPGA and add them to the Iterator or Amplitude variables. The Iterator variables, Amplitude variables, and feedback/modulation transfer memory blocks are arrays the size of the number of multiplexed channels. To time domain multiplex these channels, every n cycles of the loop, we increment the element to use from these arrays used for controlling the output frequency and strength resulting in switching every $n/(100~MHz)$. After incrementing to the last channel's value, this index resets. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:FPGAoutputloop}
+\end{figure}
+
+
+\subsection{Time Domain Multiplexer}
+
+As each call instance requires its own memory block, overlaying multiple tones to implement frequency domain multiplexing requires significantly more memory usage while maintaining frequency resolution. The memory constraints in our FPGA necessitates a different multiplexing method to scale beyond $\approx10$. To generate multiplexing in time, the same memory block can be used for every output. As only one signal is output at a time, only one block needs to be called in each loop cycle. The output frequency is changed for each time slice by swapping the iterator value for crawling through the lookup table. In digital systems, this is trivial by cycling though an array of iterator values with the nth element corresponding to the nth channel in the multiplexed chain. The rate at which we switch between elements in the control arrays is derived from the reference clock. We use a counter, which we call the channel index, to determine which element of the control variables to access. The power of each TDM channel is controlled by this incrementer as well, multiplying the template block's output by an element of an array of magnitude values. This scaled value is then written to the DAC, generating the analog RF signal to control the AOD. In the 100~MHz output loop, after a specified number of ticks, we increment this counter, repeating until the counter equals the number of channels. At this point the counter resets, and we call the first elements of the control variable arrays again. Varying the number of ticks lets us set the TDM cycle rate. The tick count is used to control the TDM data collection proportion as well. A trigger from this loop is sent to the ADC loop when the number of ticks corresponds to the time period of interest in the TDM segment. This trigger stays TRUE for part of the TDM segment that is deemed usable, allowing us to implement the processing scheme given by Eq.~\ref{eq:TDMportionused}. Using this trigger, we can remove edge effects of switching between traps caused by electronics' slew rates.
+\par
+To apply modulation or feedback to the outputs, a control signal generated by other loops within the FPGA is read by the signal output generation loop. This memory transfer block is also indexed by the cycling channel index, with the location in the memory block corresponding to the TDM channel. These values are added to the iterators for manipulation of the output frequency or to the amplitudes for manipulation of the output power. Note that since both analog outputs are used for creating one deflected beam in the AOD, there is redundancy in control of the power. Modulation is only applied to "Amplitude 1", as shown in Fig.~\ref{fig:FPGAoutputloop}, to achieve linear control of the deflected beams' powers.
+\par
+By applying feedback using a constant signal for each time segment in the time division multiplexing, we are essentially performing a zero-order hold (ZOH) interpolation from the switching rate to the FPGA's clock rate. In the sections below testing the open loop transfer functions of the control system, a single TDM channel is analyzed, sending the control/modulation blocks signal to a third analog output of the FPGA for the entirety of the TDM's cycling period. Thus, the output studied is a series of steps updated at the same rate it takes to cycle through all the TDM channels, as described in Eq.~\ref{eq:ZOH}.
+
+\begin{equation}\label{eq:ZOH}
+    y(t) = x(n T) \quad nT \leq t < (n+1)T
+\end{equation}
+Here y(t) is the output, n is an integer, T is the time taken for each TDM cycle.
+
+A ZOH interpolation is equivalent to a first order CIC interpolator, described in detail in section \ref{subsec:CIC}, both having a sinc shaped magnitude response and having a group delay of $1/(2*F_c)$ with $F_c$ being the lower sampling rate. This is intuitive, as both interpolations can be thought of as a rectangular window filter with length $F_H/F_c$ applied to a zero padded signal. Naturally, this extends to higher orders. A second order CIC interpolating filter is equivalent to a first-order hold interpolator. Both of these can be described as a rectangular window convoluted with itself, giving a triangular window of twice the length.
+\par
+The output signals sent to the AOD are not represented by this test signal. Instead, it is a pulse train with pulse widths equal to the size of a TDM segment (i.e. the total cycling rate divided by the number of channels). This follows the same scaling scheme as downsampling, leading to worse attenuation of harmonics generated in the output signal. These harmonics negligibly affect the motion of the spheres, as the micromotion of turning the traps on and off has a much greater impact. It could add more noise to the system when these higher bands are aliased down into the measurement due to the control signal being convolved with the measurement as discussed in chapter~\ref{chapter:feedback}. More closed loop analysis of the system is required to study the impact of this.
+
+\subsection{Static Multitrap Generation}
+As found in section \ref{trapping}, the loading efficiency of the array can be greatly improved by using continuously on trapping beams (i.e. no deadtime due to time domain multiplexing). We would like to be able to use both beam generation methods, ideally with the ability to switch between the two with minimal loss of trapped spheres. For the continuous traps, all the different signals must be superimposed and output simultaneously. Rather than use one lookup table per tone, we take advantage of not needing dynamic traps while loading and use a single lookup table loaded with a waveform of all the tones superimposed. To generate this waveform, a Monte Carlo simulation first finds the relative phases between the tones that minimizes constructive interference to avoid power spikes in the system that could damage downstream electronics and the AOD. The amplitude of each frequency component in this template is then corrected for nonlinearities and frequency-dependent losses in the RF electronics and AOD. The phase and amplitudes are used to create waveform tables optimized to be sampled at the FPGA's 100~MHz reference clock frequency. We superimpose the tones to get the full waveform. The comb is written to a separate lookup table in the FPGA using the same circular buffer. The comb lookup table is iterated through at one step per cycle, unlike the TDM generating lookup tables. We can swap between this multiple beam generating template and the time shared single beam in two implementations. One swaps them instantaneously with a simple logic statement choosing which template is written to the DAC. The other smoothly transitions between the two, having the multibeam output and the time shared output summed and written to the DAC. In the smooth transition, multiply blocks slowly scale the multibeam output down in magnitude while scaling the time shared output up. We have found that when smoothly transitioning between beam generation methods, using an asymmetric ramping with the multibeam signal's power decreasing slower than the time share signal's power increases results in fewer spheres lost. While performing this ramping, the magnitudes of both generation methods are kept below their maximum value, ensuring that the combination does not cause saturation of the FPGA's DAC. The ramping process is slow enough that the calculations of the ramped magnitudes are calculated on the host computer, saving resources in the FPGA. Thus, the magnitudes are slowly increased or decreased in steps instead of being smoothly varied, but no noticeable effects are seen with fine enough steps.
+
+
+\section{Signal Readout}
+
+The motion of the spheres is monitored through the same FPGA. The four inputs of the ADC are used to monitor the X and Y motion from a quadrant photodiode, the Z from backscattered light and the laser power after the AOD. The ADC sampling rate is based on the same 100~MHz reference clock, which is vastly greater than our bandwidth of interest. As discussed in section~\ref{sec:TDM}, the large bandwidth ensures that the FPGA meets the criteria for properly sampling a time domain multiplexed system. FIFO data transfer blocks convey the channel in the TDM signal we are addressing at any point in time (i.e which trap in the array we are observing) and whether we are in a region of interest in the TDM segment to use the incoming signal. This portion of the segment used is arbitrarily customizable with the percentage and location able to be controlled. In our setup, we exclude the beginning of each segment to account for the rise time of the photodiodes and their transimpedance amplifiers. We also exclude a couple of clock cycles worth of data at the end of each slice as a safety buffer in the chance of imperfect TDM switch triggering. To compensate for the signal delay of the optics and electronics, the channel index and trigger are delayed for an appropriate number of ticks. These segments are then processed by filters and downsampled (discussed further in subsection~\ref{subsec:CIC}) to the TDM cycle rate.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/TDM FPGA input block.png}
+    \caption{Diagram of the SCTL that reads the ADC inputs. The inputs are quantized to be 16 bit integers. These inputs are averaged over each TDM segment to low pass filter and downsample the data. The "Data Trigger FIFO" sent from the DAC loop informs this loop when data is valid for averaging and the "Array Index FIFO" informs on the TDM channel to which the data corresponds. The "Output Valid" from the divide blocks enables data transfer between this loop and the host computer and feedback loop in the FPGA. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:FPGAinput}
+\end{figure}
+\par
+The downsampled data can then be sent from the FPGA to the host computer for storage. The data sent for storage is linked to its respective trap index which can later be used in analysis for recreating the motion of each sphere with minimal processing. Saving the demultiplexed downsampled data rather than the raw TDM input has the advantage of greatly reducing storage required by at least a factor of 10000. However, by storing the downsampled data, we eliminate the chances of offline postprocessing to correct for effects of electronics, disable tuning of the portion of segment used for crosstalk rejection and diminish the ability to distinguish aliased noise and harmonics from signal.
+\par
+Once demultiplexed, the data is also sent from the 100 MHz clocked ADC SCTL to a normal "while loop" for real time feedback processing. This loop is setup in a handshaking method with the fast ADC loop such that it will run the feedback processing upon receiving new data and then sit idle till the next valid transfer. This trigger upon transfer method, which uses the concept of a producer consumer loop architecture, proved more successful at processing the data without introduced phase errors. In another implementation, a timed loop at the TDM sampling rate was used for the feedback processing loop. This introduced an error from phase slip where the feedback loop and the tranfer of data from the ADC loop became out of sync, possibly due to jitter in the low frequency derived clock, slight variability in the TDM's actual sampling rate, or inconsistency in the time required to transfer data between loops. With this timed loop, if data takes too long to transfer, the feedback will run on the previous successfully transfered datapoint, resulting in the feedback's response delayed by a cycle. If the writing of data to a tranfer block coincides with the exact moment the timed loop attempts to read the block, it can result in the writing being corrupted, also causing a cycle of delay. Even though the handshaking triggered feedback loop may result in an unsteady processing rate, its introduced phase error is significantly less than the possible one cycle of delay introduced from using a steady timed loop. It is likely limited to $\mathcal{O}(10)$ cycles of the 100~MHz main reference clock in this case.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/averaging.png}
+    \caption{Different styles for implementing a moving average filter. a) This basic scheme stores N data points and adds them all before normalizing the output. This is the most resource intensive implementation as it requires N-1 additions as well as N-1 taps. b) This improved scheme uses a comb followed by an integrator. It requires N+1 taps, but only needs one addition and one subtraction. c) Utilizing that output is the same regardless of the ordering for a comb and integrator, we can move the integrator to be first. This is the usual form of a scaled CIC filter used in downsampling. d) Using that when downsampling, only the outputs of the averager that the resampler sees are of interest, we do not have to continuously operate the comb filter. Instead the comb filter can be replaced by a reset trigger linked to when the resampler uses a data point. This reset trigger sets the integrator's tap to 0. Now only a single tap and single addition are required. Note this implementation is only valid for a downsampling moving average filter and cannot be scaled to higher order CIC variants.}
+    \label{fig:movingaverage}
+\end{figure}
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/CIC.png}
+    \caption{Diagrams of a CIC filter to be used for decimation. a) the integrator and comb stages are both implemented before decimating the signal by a factor of R. In this configuration D delays are needed in the comb. b) the comb stage is implemented after decimating. Only D/R delays are required in the comb by taking advantage of the lower sampling rate.\cite{hogenauer_economical_1981}}
+    \label{fig:CIC}
+\end{figure}
+
+\subsection{Demultiplexing and Downsampling}\label{subsec:CIC}
+
+As we are running our time division multiplexing at a rate much greater than the trapped spheres' center of mass motion resonance frequencies, our signal of interest is bandlimited and can be completely reconstructed with just the baseband of the TDM sampling. Thus we can treat each TDM segment as one sample point. Anything with a spectral component beyond this  can be attributed to noise and harmonics from TDM. To prevent aliasing of these undesired components into our signal as we downsample, it is important to properly low-pass each segments data before decimation. This proves to be a technical challenge, as our input sampling rate of the ADC (100MHz) is four orders of magnitude greater than the "sampling rate" of our TDM to which we wish to convert. Using normal finite impulse response (FIR) filters would require more taps than the number of data points in each segment, making them too resource intensive and long to realize. On the other hand, infinite impulse response (IIR) filters will have an extremely large sampling to cutoff frequency ratio, increasing the likelyhood of instability and arithmetic errors in fixed point implementation. In an attempt to mitigate aliasing, we look to a standard tool in resampling for solutions, the cascaded integrator-comb (CIC) filter.\par
+
+CIC filters were invented by Eugene Hogenauer as an economical filter design suitable for when decimating or interpolating by large ratios. As they only use unitary feedforward and feedback mechanisms (no scaling coefficients), their impact on resource usage is minimal and no chance of arithmetic errors are possible when using large enough register widths. They are natural extensions of moving average filters, as shown by the progression of Fig.~\ref{fig:movingaverage} (a) through (c). Part (a) shows the basic diagram depiction of a moving average filter. Using x(n) to represent the filter input and y(n) to represent the filter output on cycle n of its operating loop, a normalized moving average filter of length D can be written as:
+
+\begin{equation}\label{eq:movingavg}
+    y(n) = \frac{1}{D} \Bigl( x(n) + x(n-1) + x(n-2) +~ ... ~+ x(n-[D-1]) \Bigl)
+\end{equation}
+This can be broken up into a comb with a delay of D and integrator in series followed by a scaling factor, hence the name cascaded integrator-comb. The equation for a comb filter is given in Eq.~\ref{eq:comb}. An integrator following this comb will further transform the data as described in Eq.~\ref{eq:cascint}.
+
+\begin{equation}\label{eq:comb}
+    y_C(n) = x(n) - x(n-D)
+\end{equation}
+
+\begin{equation}\label{eq:cascint}
+\begin{aligned}
+    y_I(n) &= y_C(n) + y_C(n-1) + y_C(n-2) + ~... \\
+    &= x(n) - x(n-D) + x(n-1) - x(n-D-1) + x(n-2) - x(n-D-2)+~...\\
+    &= x(n) + x(n-1) + x(n-2) +~ ... ~+ x(n-[D-1])
+\end{aligned}
+\end{equation}
+
+As combs and integrators are linear time invariant filters (i.e. they are commutative), we can rearrange the order without affecting the output. The data first being processed by an integrator and then a comb is shown below.
+
+\begin{equation}\label{eq:int}
+    y_I(n) = x(n) + x(n-1) + x(n-2) +~ ...
+\end{equation}
+
+\begin{equation}\label{eq:casccomb}
+\begin{aligned}
+    y_C(n) &= y_I(n) - y_I(n-D)\\
+    &= \bigl[ x(n) + x(n-1) + x(n-2) +~ ... ~\bigr] - \bigl[ x(n-D) + x(n-1-D) +~ ...~ \bigr]\\
+    &= x(n) + x(n-1) + x(n-2) +~ ... ~+ x(n-[D-1])
+\end{aligned}
+\end{equation}
+
+Although breaking the moving averager apart into a comb and integrator adds two more delay registers, it greatly reduces the number of calculations required from D-1 to 2. Having the freedom to switch their order allows for further resource optimization when incorporating the decimation into the CIC filter. As illustrated in Fig.~\ref{fig:CIC}, when downsampling by a factor of R, only every Rth value is of interest. As such, the comb does not need to process all incoming data, since R-1 of it's output will be discarded. Thus, if we decimate before the comb, we reduce the number of delay registers needed by a factor of R as well. Overall, the initial moving average using D-1 delay registers and addition operations has been reduced to needing a single addition and subtraction operation and D/R+1 delay registers. More combs and integrator pairs can be cascaded with each other to produce higher order CIC filter. In these higher order implementation for downsampling, all of the integrators are placed before decimation and all of the combs are placed after, further taking advantage of their linear time invariant properties. \par
+
+While CIC filters are very efficient, their response is mostly fixed, with limited tuning only by the decimating factor (R), the relative comb delay (D/R) and the order implemented (N). Combining the response of an integrator (Eq.~\ref{eq:intresp} and comb with total delay D (Eq.~\ref{eq:combresp}, a Nth order CIC filter has a sinc shaped transfer function\cite{Lyons} for large downsampling ratios, shown by Eq.~\ref{eq:CIC} and Eq.~\ref{eq:CICamp} .
+\begin{equation}\label{eq:intresp}
+    H_{I}(z) = \frac{1}{1-z^{-1}}
+\end{equation}
+
+\begin{equation}\label{eq:combresp}
+    H_{C}(z) = 1-z^{-D}
+\end{equation}
+
+\begin{equation}\label{eq:CIC}
+H_{CIC}(z) = H_I^N(z)H_C^N(z) = \frac{(1-z^{-D})^N}{(1-z^{-1})^N} = (\sum_{k=0}^{D-1} z^{-k})^N
+\end{equation}\label{eq:CICamp}
+Using frequency normalized to the new sampling rate $z = e^{i 2\pi f/R}$:
+\begin{equation}\label{eq:CICtf}
+    |H(f)| = |\frac{\sin(\pi D f/R)}{\sin(\pi f/R)}|^N \approx |D\frac{\sin(\pi D f/R)}{\pi Df/R}|^N \quad \text{for large R}
+\end{equation}
+Unlike typical recursive filters, having a pole on the unit circle here does not cause instability. In recursive filters implemented using fixed point logic, rounding of the pole's coefficient can cause shifting in the poles location. If a conditionally stable filter's pole drifts outside the unit circle, it creates an unstable system. CIC filters, having no coefficients in their difference equation, are immune to such fixed point implementation errors. Eq.~\ref{eq:CIC} guaranties that even though there is recursion, a CIC filter has linear phase and a finite length impulse response, as it is an FIR filter.\par
+There are two caveats to ensure that the CIC remains stable with a valid output in it's downsampling configuration.
+
+\begin{enumerate}
+
+    \item The integrator \textbf{MUST} be implemented using a wrapping arithmetic such as two's complement.
+    \item Each stage \textbf{MUST} accommodate the maximum expected value at its output.
+\end{enumerate}
+
+With the integrator in front of the comb, there is no safeguard to prevent runaway. Thus, any uncorrelated signal will eventually lead to the integrator overflowing. The CIC filter implemented with wrapping arithmetic allows the comb afterwards to correct for the overflow of the integrator before.\par
+The maximum growth of the signal through the CIC filter can be found by taking the sum of all the impulse response coefficients. From the moving average shape of a CIC, this intuitively is the number of delays used in all the comb elements, $D^N$, as it is essentially the maximum output that a single window of the average could reach. Given an input bit register width of $B_{in}$, the width required by all components in the CIC to pass valid data is:
+\begin{equation}\label{eq:CICwidth}
+    B_{max} = N\log_2 D +B_{in} - 1
+\end{equation}
+
+ \begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/moving_avg_scaling.png}
+    \caption{Comparison of attenuation for different length moving average filters. The length of the moving average is set by the TDM time segment length, with the entire segment used. This length decreases linearly with the number of channels, causing the filter's cutoff frequency to increase. All the filters follow the frequency response given in Eq.~\ref{eq:CICtf} with N = 1 and D = R = 100~MHz / (2.5~kHz * number of channels). The desired sampling frequency after decimation is 2.5~kHz, with it's Nyquist frequency shown by the dashed vertical red line. Extension of the filters past the new Nyquist frequency leads to worse aliasing, with the main contributions being from the main lobe spanning DC to the filters' cutoff frequencies.}
+    \label{fig:moving_avg_scaling}
+\end{figure}
+
+For our FPGA with a 16 bit input, if using $10~\mu$s TDM segments with full connection of the entire segment, we require a bit width of 25 per CIC order used. In early testing, we used long segments with few channels to emulate the frequency of TDM sampling for the eventual scaled array. These prototyping segment lengths are up to $500~\mu$s, necessitating a bit width of 31 per CIC order used. We use full precision in our case, as only 1 order is implemented, but Hogenauer's seminal paper goes into depth optimizing the memory usage and precision by discarding least significant bits and each stage in the CIC~\cite{hogenauer_economical_1981}.
+\par
+
+ \begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/CIC_aliasing.png}
+    \caption{An example of how increasing the number of TDM channels decreasing the anti-aliasing moving average filter's performance. These plots show the aliasing of the 1 channel and 4 channel filters from Fig.~\ref{fig:moving_avg_scaling} due to downsampling from 100~MHz to 2.5~kHz. Each line represents a different band aliased into the new Nyquist band. Due to filter cutoff frequency not matching the new sampling frequency in the 4 channel case, we do not observe the nice property of all aliased bands trending to 0 at DC. As such, the aliased noise in our region of interest (0-400~Hz) is greatly increased in the multiplexed case.}
+    \label{fig:CIC_aliasing}
+\end{figure}
+
+In our case where we have set time periods to be averaged, a first order CIC filter and decimator can be implemented as just one accumulator block without the need for two's complement. Only data from time periods of interest (the beginning and very end of the TDM element length excluded as discussed above) are fed to the accumulator block to achieve the integrator portion, and before the next TDM segment, the accumulator is reset to implement the comb portion, as shown by d) in Fig.~\ref{fig:movingaverage}. In this architecture, only a single memory block is necessary with a word length of $\log_2(\tau * f_{clock}) + n_{bits}$ where $\tau$ is the time being averaged, $f_{clock}$ is the CIC's input sampling frequency (the 100 MHz clock in this case), and $n_{bits}$ is the number of bits used to express each sample (16 in our case). After the CIC accumulator, we scale the data by the number of samples to achieve a unity gain output. Unfortunately, with our set constraint from TDM on the period of time we can use for the decimation filter, running higher order CIC filters requires linking the disjointed segments of data from when the TDM accesses the same channel. A multichannel CIC filter using two's complement arithmetic would be required for further improvement. With memory being the limiting factor, this is beyond the current scope. Compilations of code indicate memory usage of 99\% for the current design. A multichannel CIC filter would require a separate integrator and comb memory storage node for each channel. The number of bits needed would be scaled by twice the number of channels implemented for a first CIC with a relative comb delay of 1. With this limitation in the current filter implementation, sidebands that are not attenuated are aliased down into the Nyquist band, as demonstrated in Fig.~\ref{fig:CIC_aliasing}. Assuming that all signals above the Nyquist frequency are white noise sources (e.g. laser shot noise, Johnson noise from the analog electronics, digitization noise, etc.), limiting the averaging filter to a maximum of $f_{clock}/(f_{TDM}*n)$ samples for n channels results in scaling of the noise floor by approximately a factor of n. This represents a lower bound on the noise scaling, as it utilizes each channel's entire TDM time segment. Realistically, the time valid for each average will be shorter to negate transient effects such as electronic slew rate. For a single stage filter, this limit cannot be surpassed. Using a more complex FIR filter design, such as using optimized least-squares coefficients, does not achieve better performance. Likewise, replacing the averager with a non-trivial window shows no benefit. Window filters do exhibit better attenuation of high frequencies but at the expense of widening the lowest lobe of the filter. Widening of this lobe means more sidebands with near unity gain are aliased down into the Nyquist band. As such, attempting to implement an FIR filter without unity gain coefficients will not decrease noise and will consume more FPGA resources from storing the coefficients. Even if a multistage FIR filter, such as a higher order CIC filter, could be implemented, it would not prevent the noise increase. For example, for 50 TDM channels with a cycling rate of $2.5kHz$ a $32^{nd}$ order CIC filter still results in a $\approx 8.5$ times higher noise floor. This CIC filter would require word lengths of over 300 bits to operate, making it untenable. Likewise, an IIR anti-aliasing filter requires exorbitant numbers of bits to represent the coefficients to not become unstable. To achieve a better anti-aliasing filter, more complex signal processing techniques are necessary, such as multistage multi-rate filters with strategic truncation. 
+
+\begin{table}[]
+    \centering
+    \begin{tabular}{|c|c|c|}
+    \hline
+    Filter type & White Noise Scaling & Low Passed White Noise Scaling\\
+    \hline
+    Moving Average & 50.0125 & 49.79656\\
+    Kaiser $\beta=1$ & 50.2455 & 50.08927\\
+    Hann & 75.10637 & 75.10637\\
+    Hamming & 68.21515 & 68.21044\\
+    Bartlett & 66.76271 & 66.76252\\
+    Blackman & 86.45843 & 86.45843\\
+    Least-squares & 50.07508 & 49.85884\\
+    2nd Order CIC & 33.34586 & 33.34584\\
+    4th Order CIC & 23.98077 & 23.98077\\
+    8th Order CIC & 17.12451 & 17.12451\\
+    16th Order CIC & 12.17015 & 12.17015\\
+    \hline
+    \end{tabular}
+    \caption{Scaling of noise floor due to aliasing for various types of low pass filters for 50 TDM channels at a cycle rate of 2.5~kHz. The filter types include common window filter, a FIR filter designed using the least-squares optimization algorithm, and CIC filters of different orders, and all have a length of 800 samples. The scaling values are the average of the aliased noise power spectral density in the bandwidth of interest (0-400~Hz). This is a valid approximation since adding all the aliased sidebands results in a nearly flat PSD across the Nyquist band. The "White Noise Scaling" column represents the noise floor scaling factor if a white noise source spans the entire ADC input bandwidth (0-100~MHz). The "Low Passed White Noise Scaling" column represents the noise floor scaling factor given a white noise source that is low passed using a 4th order Butterworth filter at 3~MHz before being digitized. This is to simulate the aliasing of laser shot noise when using photodiodes with a 3~MHz bandwidth. Window filters perform much worse than a simple moving average filter due to widening of the main lobe. The main lobe is the main determinant of the scaling, as shown by the minuscule difference between the two columns.}
+    \label{tab:placeholder}
+\end{table}
+ \begin{figure}
+     \centering
+     \includegraphics[width=\linewidth]{figures/FPGA/CIC_mag.png}
+     \caption{Magnitude and phase response of downsampling techniques in our bandwidth of interest. Here the TDM sampling frequency is set to 4~kHz. The "No CIC" plots correspond to decimations without any anti-aliasing filters applied. In the "CIC" plots, our moving average filter convolutes the output with a sinc function. Results are shown for when using a single channel (i.e. no switching) and when using 10 channels. As the number of channels grows larger, the moving average filter's window length shrinks.}
+     \label{fig:CIC_mag}
+ \end{figure}
+
+ \begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/CIC_phase.png}
+    \caption{Caption}
+    \label{fig:CIC_phase}
+\end{figure}
+
+ \begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/interpolation_mag.png}
+    \caption{Caption}
+    \label{fig:interp_mag}
+\end{figure}
+
+ \begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/interpolation_phase.png}
+    \caption{Caption}
+    \label{fig:interp_phase}
+\end{figure}
+
+\section{Scalable Multiple Feedback Scheme}
+
+\begin{figure}
+    \makebox[\textwidth][c]{
+    \includegraphics[width=1.15\linewidth]{figures/FPGA/FPGA feedback.png}}
+    \caption{Diagram of the feedback processing. The effects of the laser being used to motion monitor and apply feedback are corrected for by dividing the observed power by the steady state power. Then we subtract a scaled reference point from the input to get the error signal. This is processed by a fixed point arithmetic filter composed of two cascaded biquads. The filtered data goes into a multichannel high throughput PID loop. Next in the chain is a similar filter. The PID action is scaled to an appropriate range for its respective degree of freedom and coerced to ensure that it will not ring up enough to lose a trapped sphere. The Z feedback, which controls the lasers power is transformed to compensate for the AOD's laser output power not being linear with respect to the driving RF power. It does this by interpolating the total desired output amplitude ("Amplitude 1" plus the feedback action) to the characterized response of the AOD. The feedback actions can then have their phase optimized for cooling using a series of delay blocks. The final feedback actions are stored in memory blocks to be read by the Signal Output Generation Loop shown in Fig.~\ref{fig:FPGAoutputloop} with X corresponding to "Frequency 1 Feedback/Modulation", Y corresponding to "Frequency 2 Feedback/Modulation", and Z corresponding to "Amplitude 1 Feedback/Modulation".}
+    \label{fig:feedbackdiagram}
+\end{figure}
+
+The overview of our feedback processing flow is shown in Fig.~\ref{fig:feedbackdiagram}. The demultiplexed data along with the trap of interests' index is read by the feedback loop. Rather than having completely independent feedback channels for each trapped sphere, we save on FPGA resources significantly by utilizing the time-separated nature of our signal. As only one sphere's data is processed in any single execution of the loop, we can use one feedback processing signal chain for all the spheres. For example, rather than having a separate proportional feedback multiplication block for each sphere, we use one multiplication block and use the index of the sphere to choose the proportional gain from a stored array of values. For any cases where we would need the previous value of a signal (integral action, derivative action, filter taps, etc.), we store the signal to a 1D table of data with the table's index corresponding the sphere to which it belongs. In this single feedback channel, the signal is first compensated for the effects of the laser being used to motion monitor and apply feedback are corrected for by dividing the observed power by the steady state power. Then we subtract a scaled reference point from the input to get the error signal. This is processed by a fixed point arithmetic filter composed of two cascaded biquads. The filtered data goes into a multichannel high throughput PID loop. Next in the chain is a similar filter. The PID action is scaled to an appropriate range for its respective degree of freedom and coerced to ensure that it will not ring up enough to lose a trapped sphere. The Z feedback, which controls the lasers power is transformed to compensate for the AOD's laser output power not being linear with respect to the driving RF power. It does this by interpolating the total desired output amplitude ("Amplitude 1" plus the feedback action) to the characterized response of the AOD. The feedback actions can then have their phase optimized for cooling using a series of delay blocks. The final feedback actions are stored in memory blocks to be read by the Signal Output Generation Loop shown in Fig.~\ref{fig:FPGAoutputloop} with X corresponding to "Frequency 1 Feedback/Modulation", Y corresponding to "Frequency 2 Feedback/Modulation", and Z corresponding to "Amplitude 1 Feedback/Modulation". The processing times for each stage of feedback are given in table~\ref{tab:runtimes}. The most expensive stages of the feedback are those that require more elaborate operations, such as division in feedback decoupling, interpolation in the Z response correction, or multiplication of high bit represented FXP numbers in the filters. Performing the feedback in a normal while loop leads to a slower response than in a SCTL loop, but greatly reduces the code complexity. In an effort to minimize the calculation time, multiplications are replaced by bit shifts or FXP word reinterpretations wherever possible. This implementation guarantees that the feedback will complete calculation within one TDM channel's time segment, but the output only affects the end of the current segment and beginning of the next segment. Thus, the feedback applied to the sphere's motion has some delay from this overflow into the next cycle.
+
+\begin{table}
+    \centering
+    \begin{tabular}{C|C|C|}
+     & Section Timing ($\mu s$) & Total Timing ($\mu s$)\\
+    \hline
+    Loop Transfer & 0.3 & 0.3 \\
+    Error Calculation with Feedback Decoupling & 0.9 & 1.2\\
+    Pre-PID Filter & 0.7 & 1.9\\
+    PID & 0.9 & 2.8 \\
+    Post-PID Filter & 0.5 & 3.3\\
+    Scaling & $< 0.1$ & 3.3\\
+    Coerce Output & $< 0.1$ & 3.3\\
+    Z-Delay Phase Shift & 0.2 & 3.5\\
+    Response Correction & 0.6 & 4.1\\
+    \end{tabular}
+    \caption{Processing time required for each stage in the feedback system. All times are given in microseconds with $0.1~\mu s$ precision. The loop transfer time is the base time required to pass data from the input SCTL to the feedback loop and back to the input loop.}
+    \label{tab:runtimes}
+\end{table}
+
+\subsection{Designing Digital Filters for TDM Signals}\label{subsec:filter}
+
+As our signals are multiplexed in time, prebuilt filter functions will not work. Prebuilt filters will link consecutive points of data that do not represent the same trap. In order to implement filters, custom FPGA blocks were developed where the data for one sphere's cycle is saved to a memory block for use in the next cycle of that traps data. With this memory storage method to properly link data, any filter tap requires additional storage equal to the number of traps. When scaling up to hundreds of trapped spheres, filters with many taps quickly consume most of the FPGA's resources. To minimize impacts on FPGA resource usage when scaling up to trap larger arrays, infinite impulse response (IIR) filters are implemented. Finite impulse response (FIR) filters consume too much memory for scaling up in our system, as they can require up to an order of magnitude more delay nodes to achieve similar performance, as shown in Fig~\ref{fig:filter_comparison}. To compare different filter implementations, we used MATLAB's filter designer toolkit to create minimum order low pass filters with a 1 dB ripple passband with a normalized cutoff frequency of 0.1 and a 40 dB attenuated stopband with a normalized cutoff frequency of 0.15. This filter is a realistic test of one we would use in our signal processing chain. We compared an equiripple FIR filter to the four most common IIR designs: Butterworth, Chebyshev type 1, Chebyshev type 2, and elliptic. For designing a filter with the same performance characteristics, elliptic filters vastly outperform FIR filters in resource utilization, with the minimum order necessary being less than ten times that of a comparable FIR filter. Chebyshev filters have slightly worse resource optimization, and of the common IIR filter implementations, Butterworth filters have the worst resource optimization. However, even the Butterworth filter shows performance that is more than four times better than the FIR filter in this instance. This difference is heightened in sharper filter designs. The trade off for improved resource management is introducing non-linearity into the phase response of the filter, as demonstrated by the phase Bode plot in Fig.~\ref{fig:filter_comparison}. Creating a multichannel system only exacerbates this due to its memory scaling described above. An additional advantage of IIR filters is their instantaneous impulse response from their feedback based architecture. This enables a closer to real-time responses to the sphere's motion in some IIR designs, as opposed to FIR filters, where the impulse response time is proportional to the number of delays in the filter. An example comparing the impulse response of different filter implementations with similar magnitude responses is illustrated in Fig.~\ref{fig:filter_impulse_comparison}. The reason for this distinction can be seen in the filters' difference equations, which describe their outputs as a function of the sample $n$. FIR filters only utilize a linear combination of the input and its previous $M$ values, as shown by Eq.~\ref{eq:FIRdiff}, with $b_i$ representing the filter coefficients. A system diagram of an FIR filter looks like (a) in Fig.~\ref{fig:movingaverage}, but with scalings applied to each delay before combining.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/filter_comparison.png}
+    \caption{Comparison of performance between FIR and IIR filter implementations. All the filters are designed using MATLAB's digital filter designer with floating point arithmetic. The passband cutoff frequency is set at a normalized angular frequency of 0.1, and the stopband frequency is set to 0.15 with an attenuation of -40~dB. The allowed ripple in the passband is 1~dB. All the filters are designed to be the minimum order possible. The equiripple FIR filter's order is at least a factor of 4 greater than comparable IIR filter implementations, which is a one-to-one correlation with memory usage in the FPGA.}
+    \label{fig:filter_comparison}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/filter_impulse_comparison.png}
+    \caption{Comparison of impulse response between FIR and IIR filter implementations. All the filters are designed using MATLAB's digital filter designer with floating point arithmetic. The passband cutoff frequency is set at a normalized angular frequency of 0.1, and the stopband frequency is set to 0.15 with an attenuation of -40~dB. The allowed ripple in the passband is 1~dB. All the filters are designed to be the minimum order possible. The equiripple FIR filter has the slowest impulse response, taking half of its order number of samples to reach the peak response. The elliptic responds the quickest, around 10 samples, with the Chebyshev type I being similar. The Butterworth filter's impulse response time is similar to the FIR filter's, as quickness is traded off for reduced magnitude ripple and improved phase linearity.}
+    \label{fig:filter_impulse_comparison}
+\end{figure}
+
+\begin{equation}\label{eq:FIRdiff}
+\begin{aligned}
+    y[n] &= b_0 x[n] + b_1 x[n-1] + ~...~+b_M x[n-M]\\
+    &= \sum_{i=0}^{M} b_i x[n-i]
+\end{aligned}    
+\end{equation}
+
+IIR filters are recursive in nature, meaning that the output depends on its past values. IIR filters generally use past values of the input as well. The difference equation of an IIR filter is given by Eq.~\ref{eq:IIRdiff}, with $b_i$ representing the coefficients for the feedforward components and $a_j$ representing the coefficients for the feedback components.
+
+\begin{equation}\label{eq:IIRdiff}
+\begin{aligned}
+    y[n] &= b_0 x[n] + b_1 x[n-1] + ~...~ + b_M x[n-M]\\
+    &\quad + a_1 y[n-1] + a_2 y[n-2] + ~...~ + a_N y[n-N]\\
+    &= \sum_{i=0}^{M} b_i x[n-i] + \sum_{j=1}^N a_j y[n-j]
+\end{aligned}    
+\end{equation}
+
+Taking the Z transform of the IIR filter's difference equation, we get the filter's transfer function, which can be factored into a product of first-order polynomials.
+
+\begin{equation}\label{eq:IIRTF}
+\begin{aligned}
+H(z) &=  \frac{b_0 + b_1 Z^{-1} + ~...~ + b_M Z^{-M}}{1+a_1 Z^{-1} + a_2 Z^{-2} + ~...~ + a_N Z^{-N}}  = \frac{\sum_{i=0}^{M} b_i Z^{-i}}{1 + \sum_{j=1}^N a_j Z^{-j}}\\
+&= b_0 \frac{(1-q_1 z^{-1})(1-q_2 z^{-1})...(1-q_M z^{-1})}{(1-p_1 z^{-1})(1-p_2 z^{-1})...(1-p_N z^{-1})} = b_0 ~\frac{\Pi_{i=0}^M (1-q_i z^{-1})}{\Pi_{j=0}^N (1-p_j z^{-1})}
+\end{aligned}
+\end{equation}
+
+The factored form is called ZPK representation with $q_i$ being zeros, $p_j$ being poles, and the constant in front being the gain $k$.
+\par
+
+When designing a high order IIR filter, it can become unwieldily to implement M feedforward delay paths and N feedback delay paths in once instance. Instead, we can break up the filter multiple parts using their linear, time-invariant nature. Two filters applied in series have a combined transfer function that is the product of each individual filter's transfer function. Likewise, the ordering of the filters in the signal chain can be rearranged while preserving the overall transfer function. Thus, utilizing that an Mth IIR filter is a product of first order polynomials, it can be decomposed into many smaller order filters in serial.
+
+\par
+
+The common practice for realizing high order filters in digital signal processing is by breaking up the filter into cascaded 2nd order blocks called biquads. Biquads consist of two feedback elements and two feedforward elements, essentially truncating Eq.~\ref{eq:IIRdiff} to $M=N=2$.
+
+\begin{equation}\label{eq:DF1diffeq}
+    y[n] = b_0 x[n] + b_1 x[n-1] +  b_2 x[n-2] - a_1 y[n-1] - a_2 y[n-2]
+\end{equation}
+
+The transfer function of a biquad is given by Eq.~\ref{eq:biquadTF}.
+
+\begin{equation}\label{eq:biquadTF}
+    H(z) = \frac{b_0 + b_1 Z^{-1} + b_2 Z^{-2}}{1+a_1 Z^{-1} + a_2 Z^{-2}} = k~\frac{(z-q_1)(z-q_2)}{(z-p_1)(z-p_2)}
+\end{equation}
+
+\par
+
+In our design, we have chosen to use canonical forms of biquad structures to implement IIR filters with the most efficient use of memory. We use transposed direct form 2 (TDF2) biquads, which use 2 delay nodes per channel. Direct form 2 biquads require 2 delay nodes per channel, as shown in Fig.~\ref{fig:biquads}, while direct form 1 (DF1) biquads need 4 delay nodes. 
+The difference equations for DF1 is given in Eq.~\ref{eq:DF1diffeq}.
+
+\begin{equation}\label{eq:DF1diffeq}
+    y[n] = b_0 x[n] + b_1 x[n-1] +  b_2 x[n-2] - a_1 y[n-1] - a_2 y[n-2]
+\end{equation}
+
+The difference equations for DF2 are shown in Eq.~\ref{eq:DF2diffeq}, with $d[n]$ being the internal state of DF2.
+
+\begin{equation}\label{eq:DF2diffeq}
+\begin{aligned}
+    &d[n] = x[n] - a_1 d[n-1] - a_2 d[n-2] \\
+    &y[n] = b_0 d[n] + b_1 d[n-1] +  b_2 d[n-2]
+\end{aligned}
+\end{equation}
+
+To realize the transposed biquad forms, first all addition blocks are converted to nodes and vise versa. The directions of all the arrows are reversed, and the input $x[n]$ and the output $y[n]$ are swapped. The difference equation for a TDF2 biquad is given in Eq.~\ref{eq:TDF2diffeq}. Note that there are two internal states in TDF2: $d_1[n]$ and $d_2[n]$, as shown in Fig.~\ref{}.
+\begin{equation}\label{eq:TDF2diffeq}
+\begin{aligned}
+    &d_2[n] = b_2 x[n] - a_2 y[n] \\
+    &d_1[n] = b_1 x[n] - a_1 y[n] + d_2[n-1]\\
+    &~y[n]~ = b_0 x[n] + d_1[n-1]
+\end{aligned}
+\end{equation}
+These internal states differ from the one in a DF2 biquad in that they contain effects from both the feedforward and feedback elements of the filter. 
+\par
+If implemented with infinite precision and word length, all biquad forms will perform identically. However, when using fixed point arithmetic with a set word lengths, some forms become more susceptible to errors. The main errors associated with fixed point implementation are overflow in math operations from not using long enough words to represent the internal states of the filter or the output, quantization from rounding at the least significant bit, and limit cycles from rounding of coefficients. Of all the realizations, DF1 biquads are held to be the most stable. Their structure using separate delay node chains for the feedback and feedforward paths leads to lower internal states and lower probability of overflow. Similarly, the feedforward operations preceding the feedback operations can attenuate internal states, making it less likely to overflow. This is akin to interpolating CIC filters not having the overflow issues of their downsampling counterparts. TDF2 biquads share some of these characteristics. The feedforward and feedback elements can be paired resulting in lower magnitude internal states. This illustrates a pivotal point in cascaded biquad filter design. For an $M^{th}$ order filter, there are M/2 pole pairs and zero pairs. These poles and zeros can be combined arbitrarily, resulting in (M/2)! configurations. Conjugate pole pairs are combined with their closest zeros to prevent lower internal amplitude within each biquad. Similarly, the cascaded biquads can be ordered in (M/2)! ways. Usually they are ordered such that the innermost poles (near 0 on the unit circle) come first ascending to the outermost poles. Luckily, most filter design tools, such as MATLAB, incorporate this into their algorithms, so we do not have to deal with optimal filter design strategies.
+\par
+When designing a fixed point arithmetic biquad block, much consideration must be given to the bit depth of signals being processed. To avoid saturation, filters can use buffer bits, maintaining headroom at the most significant bit when processing sinusoidal signals at the maximum expected value. Likewise, the bit depth for coefficients and states can be selected such that rounding errors are below the system's noise floor. For a generalized filter, the inputs can be bit shifted to maximize precision of the filter and then shifted back at the output. This allows for the development of a biquad filter module that can be placed at any point in our signal processing chain.
+
+\par
+
+My design for a multi-channel, TDM compatible TDF2 biquad is illustrated in Fig.~\ref{fig:FPGAbiquad}. To match the structure generated by MATLAB's filter coefficient calculator, the input is first scaled before going through the basic TDF2 signal chain. Instead of using basic delay nodes for the internal states, I use a memory block array, where the address of each element corresponds to its channel. Each element of the memory block array holds a bundle of the two internal states for a channel. This takes advantage of the time separated processing inherent with TDM. Only scaling the memory block with number of channels greatly reduces the strain placed on the FPGA's internal resources compared to implementing an additional biquad for each channel. In calculating $d_1$, the feedforward and feedback operations are first combined to minimize their magnitude before adding $d_2$, reducing the risk of overflow errors. The FXP word and integer lengths for the operations, states and coefficients of the biquad are given below.
+
+
+
+\par
+
+The pre-PID filter and post-PID filter blocks in my signal processing chains both consist of two cascaded biquads, allowing for realization of fourth order IIR filters. Fig.~\ref{fig:cascadedbiquad} shows the realization of these 4th order cascaded biquad system with unity gain output. First, the input fixed point word is recast to add buffer bits to the beginning and end of the data's word and scale the value for ease in calculating the filter parameters with MATLAB. The recast signal is sent to the first biquad, along with the MATLAB generated scaling and filter coefficients and an integer indicating the signal's channel. After the first biquad, the signal is right shifted to perform an efficient division operation. This ensures that the FXP output of the first biquad has the same word and integer lengths as the input. By scaling the output, the same biquad implementation can be used for the second biquad instead of designing a new implementation with different numbers of bits allocated to its arithmetic operations and FXP representations. As the biquad form is generalized for any IIR filters, we implement any filter desired without needing to recompile or stop the FPGA. The versatility of realizing Butterworth, Chebyshev and elliptic filters in low pass, high pass, band pass and all pass configurations is helpful to properly apply the correct phase shift to the control signal for optimal cooling of the sphere's motion. The biquads can also realize notch filter, which are useful in managing background signals such as the 60 Hz leakage from power mains. Various examples of the performance of the custom biquad filters are shown below, with comparison to the ideal performance modeled with MATLAB.
+
+
+\begin{figure}
+    \makebox[\textwidth]{
+    \includegraphics[width=1.2\linewidth]{figures/FPGA/biquads.png}}
+    \caption{The implementation of a generalized fixed point biquad IIR filter. In (a), the DF1 form is shown. It implements the feedforward part before the feedback part, requiring separate delay nodes for each path. There are no different internal states to consider, as the delay nodes only use the input and the output. To attain a DF2 biquad, the feedback path is placed before the feedforward path, as shown in (b). Now we have a redundancy of delay nodes, as both paths use the same values. This lets us simplify the biquad to its canonical form, in (c), in which only 2 delay nodes are used. Now there is an internal state $d(n)$ stored by the delay nodes. In fixed point implementation, overflow errors of this internal state can lead to degradation of the biquad's performance.}
+    \label{fig:biquads}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\linewidth]{figures/FPGA/TDF2.png}
+    \caption{Transposed direct form 2 of a biquad filter block. TDF2 biquads are canonical implementations, as demonstrated by the presence of only 2 delay nodes. There are two internal states, with their expression given in Eq.~\ref{eq:TDF2diffeq}. TDF2 biquads are deemed as more stable than DF2 biquads due to combining the feedforward and feedback effects on the internal states, allowing for grouping of poles and zeros. Grouping a zero and pole located near each other on the unit circle minimizes the total swing of the internal state and the potential to overflow.}
+    \label{fig:TDF2}
+\end{figure}
+
+ \begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/FPGA/pole_placement_quantized.png}
+    \caption{Diagram showing the allowed locations of poles on the unit circle due to coefficient quantization of an IIR filter. The first quadrant of the unit circle is shown. The red dots are the quantized locations, which arise from intersections between the dashed blue and orange lines. The blue concentric circles are from $r^2$ being quantized to 16 values (including $r=0$). The orange vertical lines are from  being quantized to 16 values (including 0). Note that both the vertical lines and concentric circles don't reach values of 1 due to signed 16 bit FXP numbers having unequal positive and negative values with the negative side being inclusive of the bound and the positive side being exclusive of the bound.}
+    \label{fig:pole_quantized}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/FPGA biquad.png}
+    \caption{Implementation of a TDF2 biquad in the FPGA. First the input is scaled before being propagating through the signal paths. The top signal path calculates the first internal state. The middle signal path calculates the output. The bottom signal path calculates the second internal state. When calculating the first internal states, the feedforward and feedback paths are combined first (e.g. $b_1 x -a_1x$) before adding the second internal state. Internal states are bundled and stored in a memory block array. The element address in the array corresponds to the TDM's current channel being processed. This enables more efficient implementation of a multichannel filter. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:FPGAbiquad}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/FPGA cascade biquads.png}
+    \caption{To create up to fourth order filters, two biquads are cascaded. First the input signal's fixed point word is reinterpreted to a set word length (len) and integer length (int). This adds buffer bits to protect from overflow and rounding errors. The signal is sent to the first biquad along with the corresponding TDM channel, scaling factor and filter coefficients. The output of the first biquad is left shifted to ensure that the fixed point word properties are equal to its input. This allows for reuse of the same biquad implementation structure, not needing to generate a new one with different fixed point parameters. The output of the second biquad has its fixed point form reinterpreted to be the same bit depth as the initial input and have unity gain. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:cascadedbiquad}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/filter_type_mag.png}
+    \caption{Caption}
+    \label{fig:filter_type_mag}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/filter_type_phase.png}
+    \caption{Caption}
+    \label{fig:filter_type_phase}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/filter_scale_mag.png}
+    \caption{Caption}
+    \label{fig:filter_scale_mag}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/filter_scale_phase.png}
+    \caption{Caption}
+    \label{fig:filter_scale_phase}
+\end{figure}
+
+\subsection{PID Controller Design}\label{subsec:PID}
+
+ \begin{figure}
+     \centering
+     \includegraphics[width=\linewidth]{figures/FPGA/prop_bode.png}
+     \caption{Magnitude and phase response of the proportional action. Here the TDM sampling frequency is set to 4~kHz. These are the accumulated magnitude and phase transfer functions for the derivative and the decimating moving average filter combined. Results are shown for when using a single channel (i.e. no switching) and when using 10 channels.}
+     \label{fig:prop_perf}
+ \end{figure}
+ 
+To generate our feedback control signal, we use a high-throughput PID. Being a high-throughput design means that our sampling rate is assumed to be large enough with respect to our bandwidth of interest that derivative and integral operations can be simplified to point-to-point differences and accumulators. The design of the PID block is shown in Fig.~\ref{fig:FPGAPID}. We generate the proportional action by multiplying the input error signal by a scaling factor. The derivative action uses the difference of the input and its previous value, then is multiplied by our gain factor. In this implementation, the normalizing factor to correct for the sampling rate is omitted, as it can be incorporated into our gain to reduce the total number of operations required. To attenuate the gain of the derivative at high frequencies, we include a smoothing mechanism. As our bandwidth of interest typically ranges from DC to $0.2*f_{samp}$, attenuating higher frequencies is important to not cause ringing by feeding back on noise in the upper range. We combine the derivative output and its previous output, weighting each by multiplying them by a factor between 0 and 1. When not using smoothing (i.e. the first weighting is 1 and second is 0), our derivative operation takes the form of a first-difference differentiator. When the weightings are both set to 0.5, we get the central-difference derivative, which is a common method used for systems when the higher frequencies are not of interest. A central difference derivative uses the difference between the input and its twice delayed value. The equivalence between this and the our implementation is shown in Eq.~\ref{eq:centraldiff}.
+
+\begin{equation}\label{eq:centraldiff}
+\begin{aligned}
+    &d[n,n-1] = x[n] - x[n-1]\\
+    &y[n] = \alpha~d[n,n-1] + \beta~d[n-1,n-2]: \alpha, \beta \in \{ 0,1 \} \\
+    &y[n] = \frac{1}{2}(x[n] - x[n-1] + x[n-1] - x[n-2]) = \frac{1}{2}d[n,n-2]: \alpha = \beta = 0.5
+\end{aligned}
+\end{equation}
+
+\begin{figure}
+     \centering
+     \includegraphics[width=\linewidth]{figures/FPGA/diff_mag.png}
+     \caption{Magnitude and phase response of the derivative using first difference and unnormalized central difference methods ($\alpha = \beta = 1$). Here the TDM sampling frequency is set to 4~kHz. These are the accumulated magnitude and phase transfer functions for the derivative and the decimating moving average filter combined. Results are shown for when using a single channel (i.e. no switching) and when using 10 channels.}
+     \label{fig:derivative_mag}
+\end{figure}
+\begin{figure}
+     \centering
+     \includegraphics[width=\linewidth]{figures/FPGA/diff_phase.png}
+     \caption{Magnitude and phase response of the derivative using first difference and unnormalized central difference methods ($\alpha = \beta = 1$). Here the TDM sampling frequency is set to 4~kHz. These are the accumulated magnitude and phase transfer functions for the derivative and the decimating moving average filter combined. Results are shown for when using a single channel (i.e. no switching) and when using 10 channels.}
+     \label{fig:derivative_phase}
+\end{figure}
+
+By comparing the transfer functions the first-difference implementation ($H_{fd}$) and the central-difference implementation ($H_{cd}$) to the ideal derivative response ($H_{ideal}$) as a function of normalized angular frequency $\omega = 2\pi f/f_{s}$ in Eq~\ref{eq:derivativeTF}, we see how this smoothing factor is useful in attenuating high frequency noise of the system.
+\begin{equation}\label{eq:derivativeTF}
+    |H_{ideal}(\omega)| = |\omega| \quad ; \quad |H_{fd}(\omega)| = 2|\sin(\omega/2)| \quad ; \quad |H_{cd}(\omega)| = |\sin(\omega)| 
+\end{equation}
+The first-difference differentiator keeps rising The phase response of the derivative for the case of $\alpha = 1$ and $\beta = 0$ is linear with a group delay of half the sampling period, as it is a simple FIR filter with one delay node. The phase response of a central difference derivative is linear with a group delay of one sampling period, as it can be rearranged to the form of a FIR filter with two delay nodes. More complex point-to-point implementations exist which achieve performance closer to the ideal magnitude response in the bandwidth of interest, such as super Lanczos low-noise differentiators or high tap optimized wideband differentiators. We have opted not to use them to minimize memory usage.
+
+\par
+
+To generate the integral action, we use the simplest form with the ideal phase response, the trapezoidal rule integrator. The difference equation and frequency response of this implementation is shown in Eq.~\ref{eq:trapezoiddiff} and ~\ref{eq:trapezoidresp}, where $g_I$ represents the integral gain coefficient.
+
+\begin{equation}\label{eq:trapezoiddiff}
+    y[n] = \frac{g_I}{2}(x[n] + x[n-1]) + y[n-1]
+\end{equation}
+\begin{equation}\label{eq:trapezoidresp}
+    H_{trap}(z) =  g_I\frac{0.5(1 + Z^{-1})}{1-Z^{-1}}
+\end{equation}
+
+We do not use a basic accumulator ($y[n] = g_I x[n] + y[n-1]$) for calculating the integral due to its phase response. An accumulator has a phase response of $-\pi/2$ radians at DC, but it is linearly increasing, reaching 0 radians at the Nyquist frequency. The 1/2 sample group delay in the feedforward portion added by the trapezoid rule method corrects for the linearly increasing slope, giving a constant $-\pi/2$ radian phase shift across all frequencies. At higher frequencies, this method's gain falls off faster than the ideal integrator's response of 1/f. This is acceptable in our case, as it is stable at the Nyquist frequency unlike higher order methods of calculating the integral.
+
+\begin{figure}
+    \makebox[\textwidth][c]{
+    \includegraphics[width=1.2\linewidth]{figures/FPGA/FPGA PID.png}}
+    \caption{Diagram of FPGA implementation of PID. The top signal path calculates the proportional action with gain $g_p$. The middle path calculates the integral action $A_I$ using the trapezoid rule. The factor of 1/2 for the trapezoid rule is built into the gain $g_I$. To prevent windup of the integrator, we check if the total output is above a set threshold. If it exceeds the threshhold, the previous value of the integral action is stored for the next loop execution instead of the current integral action value. The bottom signal path calculates the derivative $A_d$. A weighted sum combines the derivative action and its previous value to smooth the response and attenuate the gain at high frequencies. The input error value, integral action, and derivate action are bundled and stored in a memory block array to use next cycle. The memory block array's address value corresponds to the channel of TDM being processed. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:FPGAPID}
+\end{figure}
+
+\subsection{Phase Control for Optimizing Feedback Performance}\label{subsec:phase}
+
+Under ideal conditions, the only contributor to phase lag or lead in the feedback control action of the spheres' motion would be the PID's derivative and integral terms. As shown above, this is not the case in our digital signal processing chain. These excess phase shifts can cause cooling to turn into trapping or anti-trapping depending on the direction. To rectify this, we want to be able to tune the phase response of the system, optimizing it for trapping and cooling. Using the signal processing blocks we have developed, there are two approaches: using an FIR filter composed of unitary gain delay nodes, and using a second order IIR all-pass filter implemented with a single biquad.
+\par
+The FIR method consists of many delay nodes linked in series and a switch that chooses the amount of delays desired. Since only $Z^{-1}$ blocks are used, there is a flat gain and group delay across all frequencies. This is a memory intensive solution for TDM, as each $Z^{-1}$ delay requires an array the size of the maximum number of channels desired. Additionally, achieving $2\pi$ phase shifts at low frequencies increases the number of delays necessary. For a frequency of interest $f$, the number of samples representing a full cycle is $\lceil f_s / f \rceil$. This can be reduced by using only half of a cycle to reach phase shifts of $\pi$ and, using properties of sinusoidal signals, negating the output for shifts from $\pi$ to $2\pi$. Further reductions are gained by downsampling to even lower sampling frequencies. Using the filters implemented upstream in the signal chain as anti-aliasing filters, only every nth sample is stored in the delay nodes, with the rest discarded, creating a new sampling frequency $f'_s = f_s /n$. With these modifications, the necessary amount of delays required becomes $\lceil f_s/(2nf)\rceil$. For a sampling rate of 2.5~kHz, our axial motion with resonant frequencies $f\approx 30 Hz$ would require $\approx 5$ delay nodes and downsampling by a factor of 8 while maintaining a decent throughput rate of 10 samples per period of a sphere's motion. The implementation of such a scheme is shown in Fig.~\ref{fig:Zphasedelay}. At this 2.5~kHz input sampling rate with no additional decimation, the radial motion's resonant frequencies in the range of 100-300~Hz would require between 5 and 13 delay nodes. The output from this delay block when decimation is used must be interpolated to the feedback loop's rate. With the current method, the output is a zero-order hold interpolation, keeping the output value constant until it is updated. No interpolation filter is implemented afterward to smooth out the signal, but zero-order hold imaging effects are small enough to not be a concern for us currently. 
+
+%fix this
+To reduce imaging, an FIR filter is placed after interpolation. For zero-order hold, the FIR filter distorts the gain of the original signal. More commonly, zero stuffing is implemented instead, resulting in identical spectral replications, and the output is processed with a polyphase FIR filter, which takes advantage of the zeros to reduce the number of multiplications required. This standard practice results in better control of the amplitude, but introduces further phase delays from the polyphase filter.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/FPGA FIR Delay.png}
+    \caption{FIR phase delay implemented on the FPGA. Multiple memory blocks are connected in series. The address of the memory block corresponds to the TDM's channel. The total number of delays implemented is fixed upon compiling the FPGA, but a switch is used to dynamically control the output's desired delay for each channel. To reduce the total number of delays required, the delay nodes are only updated every R\textsuperscript{th} cycle for each channel where R is the decimation factor. This is equivalent to downsampling by R and then interpolating back to the original sampling rate using the first-order hold method. There is an option to negate the output (equivalent to adding a $\pi$ delay), further reducing the number of delays required by a factor of 2. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:Zphasedelay}
+\end{figure}
+
+\par
+
+IIR all-pass filters can achieve much greater phase shifts with fewer resources. In most applications, a second order all-pass filter is sufficient, giving control over the steepness of phase delay and break point where the delay is $\pi$. All-pass filters are simply combinations of highpass and lowpass filters such that there is a unitary gain across all frequencies. The transfer function for a second order all-pass filter in Eq.~\ref{eq:allpassTF} illustrates this point.
+
+\begin{equation}\label{eq:allpassTF}
+    H(z) = \frac{b + a(1+b)Z^{-1} + Z^{-2}}{1+a(1+b)Z^{-1} + bZ^{-2}}
+\end{equation}
+
+The numerator's polynomial coefficients are set as the reversed coefficients of the denominator's. In this case, for a filter with a real transfer function, they are called a mirror-image pair. By putting the coefficients in the form above, we can define them based on the bandwidth and shared cutoff frequency of the two. The bandwidth $\Delta f$ controls the ste
+epness the phase response's slope, and the cutoff frequency $f_c$ is where there is a phase shift of $\pi$.
+
+\begin{equation}
+    b = \frac{\tan(\pi \Delta f / f_s) -1}{\tan(\pi(\Delta f/f_s)+1}
+\end{equation}
+\begin{equation}
+        a = -\cos(2\pi f_c/f_s)
+\end{equation}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/FPGA/FPGA allpass.png}
+    \caption{Second order IIR all-pass filter implemented on the FPGA. It follows the same implementation as the TDF2 biquad with simplification of the coefficients. Using the symmetries of the filter coefficients, only two values are needed. To achieve independent phase control of each trap, the filter coefficients are arrays of constants where the index corresponds to the TDM channel, similarly to the internal state storage. See Fig.~\ref{fig:FPGAsymbols} for the diagram symbols key.}
+    \label{fig:allpass}
+\end{figure}
+
+
+\subsection{Correction of Actuator Nonlinearities}\label{subsec:responsecorrect}
+
+For feedback control of the laser's power to cool the axial motion of the spheres, we correct for the nonlinear relation between the FPGA's signal amplitude and the AOD's deflected power. Since it is not a simple relation between desired percentage of output power and actualized percentage of output power, we interpolate the proper response from a lookup table loaded with calibration data. The feedback's linear response is first added to the static gain of that channel. This is scaled to be the address of the lookup table giving the proper value correlating to the desired gain. To achieve finer control with fewer calibration data points, the lookup table gives the value corresponding to the address and its next value. Any residual rounded off when converting the input into the integer address is used for a linear interpolation between these two points. Then, the static compensated gain is subtracted, leaving the corrected feedback's response.
+
+\section{Modulation of Control Parameters}\label{subsec:FPGAmodulator}
+
+To be able to verify that the laser power correction decoupling the actuator from the signal is successful and characterize the feedback system, modulations of the array's traps' powers and positions is a useful tool. The method of generating the modulation signal is similar to generating the output itself. A sine wave lookup table is loaded into a SCTL linked to a 40~MHz reference clock. With this slower clock, the lookup table's size requirement is reduced in achieving similar frequency resolution. Like the DAC signal generation, we control the frequency of the modulation by setting the iterator value for crawling through the table, and the resulting waveform is scaled to achieve the desired amplitude. The modulation signal is transmitted from the 40~MHz SCTL to the 100~MHz DAC SCTL using FIFO transfer blocks. In the DAC SCTL, the modulation is added to the constants controlling the frequency and amplitude of the DAC's output: "Iterator 1", "Iterator 2", and "Amplitude 1" as seen in Fig.~\ref{fig:FPGAoutputloop}. When modulation is not being applied, the addition of the FIFO with these values is disabled. To not cause large impulses when turning off modulation, the lookup table triggers an off switch when near the beginning (i.e. near 0). The modulation parameter is applied to the different TDM channels independently, with us being able to choose which ones are affected. However, only one modulation is possible at a time, as generating many independent tones would require an additional memory block for each. In total, three sine wave lookup tables are implemented, enabling simultaneous stimulation of the power and beam positions with different parameters. The lookup tables can be reduced further in size, only storing a quarter of a period by leveraging symmetries and calling the table with arguments in the form of binary angular measurements. Other methods with reduced static memory usage can be used to generate the modulation tone. Rather than the lookup table approach for sine wave generation, we could use coordinate rotation digital computer (CORDIC) algorithms for point-by-point generation of the output waveform without static memory usage. CORDIC operations trade memory usage for latency, taking several cycles of a loop to calculate each point. For our system, the modulation frequencies used are much lower than the FPGA's clock rate and latency is a non-issue. This technique is not considered for generating the main output signals due to the latency.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/FPGA/fpga symbols.png}
+    \caption{FPGA diagrams' symbols and colors meanings. Pink blocks generally represent dynamic memory usage. Blue blocks represent mathematical operations. Black boxes represent static constants. Orange boxes represent FPGA resources, such as the reference clock and analog inputs/outputs.}
+    \label{fig:FPGAsymbols}
+\end{figure}
